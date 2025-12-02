@@ -17,6 +17,7 @@ uint16_t ts_len = 0;
 
 bool inc_mac = false;  // For testing only: send incorrect MACs
 
+
 void init_sec(int initial_state, char* host, bool bad_mac) {
     state_sec = initial_state;
     hostname = host;
@@ -24,6 +25,12 @@ void init_sec(int initial_state, char* host, bool bad_mac) {
     init_io();
 
     if (state_sec == CLIENT_CLIENT_HELLO_SEND) {
+        // Generate private key
+        generate_private_key();
+
+        // Derive public key from private key
+        // Will be stored in public_key global variable
+        derive_public_key();
     } else if (state_sec == SERVER_CLIENT_HELLO_AWAIT) {
     }
 }
@@ -33,7 +40,36 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
     case CLIENT_CLIENT_HELLO_SEND: {
         print("SEND CLIENT HELLO");
         client_hello = create_tlv(CLIENT_HELLO);
-        return serialize_tlv(buf, client_hello);
+
+        // Generate nonce
+        uint8_t *nonce_buf = malloc(NONCE_SIZE);
+
+        if (!nonce_buf){
+            error("Failed to allocate buffer for nonce");
+        }
+
+        // Add Nonce TLV to Client Hello
+        tlv* nn = create_tlv(NONCE);
+
+        generate_nonce(nonce_buf, NONCE_SIZE);
+        add_val(nn, nonce_buf, NONCE_SIZE);
+        add_tlv(client_hello, nn);
+
+        // Add Public Key TLV to Client Hello
+        tlv* p_key = create_tlv(PUBLIC_KEY);
+
+        add_val(p_key, public_key, pub_key_size);
+
+        add_tlv(client_hello, p_key);
+
+
+        // Send data to transport layer, save length of data sent
+        uint16_t len = serialize_tlv(buf, client_hello);
+        
+
+        free_tlv(client_hello);
+
+        return len;
     }
     case SERVER_SERVER_HELLO_SEND: {
         print("SEND SERVER HELLO");
