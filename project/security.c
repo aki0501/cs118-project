@@ -91,7 +91,7 @@ const uint8_t* prep_data_to_sign(tlv* client_hello, uint8_t* nonce_buf, size_t s
     uint8_t* p = to_sign;
 
     memcpy(p, ch_buf, ch_len);
-    p += ch_max_len;
+    p += ch_len;
 
     memcpy(p, nonce_buf, NONCE_SIZE);
     p += NONCE_SIZE;
