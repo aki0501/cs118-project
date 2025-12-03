@@ -65,24 +65,10 @@ tlv* create_pubkey_tlv(){
     return p_key;
 }
 
-tlv* create_cert_tlv(uint8_t* cert){
-    tlv* cert_tlv = create_tlv(CERTIFICATE);
 
-    add_val(cert_tlv, cert, cert_size);
-
-    return cert_tlv;
-}
-
-const uint8_t* prep_data_to_sign(tlv* client_hello, uint8_t* nonce_buf, size_t size){
-    const size_t ch_max_len = client_hello->length + 4;
-    // Serialize client_hello
-    uint8_t* ch_buf = malloc(ch_max_len);
-    if (!ch_buf){
-        error("Error allocating memory for client hello buffer in prep_data_to_sign");
-    }
-
-    uint16_t ch_len = serialize_tlv(ch_buf, client_hello);
-
+const uint8_t* prep_data_to_sign(uint8_t* ch_buf, uint8_t* nonce_buf, uint8_t* pk_buf, \
+                                 uint16_t ch_len, uint16_t nn_len, uint16_t pk_len){
+    uint16_t size = ch_len + nn_len + pk_len + cert_size;
     uint8_t* to_sign = malloc(size);
     if(!to_sign){
         error("Failed to allocate memory for data to be signed");
@@ -93,19 +79,20 @@ const uint8_t* prep_data_to_sign(tlv* client_hello, uint8_t* nonce_buf, size_t s
     memcpy(p, ch_buf, ch_len);
     p += ch_len;
 
-    memcpy(p, nonce_buf, NONCE_SIZE);
-    p += NONCE_SIZE;
+    memcpy(p, nonce_buf, nn_len);
+    p += nn_len;
 
     memcpy(p, certificate, cert_size);
     p += cert_size;
 
-    memcpy(p, public_key, pub_key_size);
-    p += pub_key_size;
+    memcpy(p, pk_buf, pk_len);
+    p += pk_len;
 
     return to_sign;
 }
 
-uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t* sh_buf, uint16_t ch_len, uint16_t sh_len){
+uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t* sh_buf, \
+                   uint16_t ch_len, uint16_t sh_len){
     uint8_t* salt_buf = malloc(ch_len + sh_len);
     if (!salt_buf){
         error("Error allocating memory for salt buffer");
@@ -113,10 +100,10 @@ uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t
 
     uint8_t* p = salt_buf;
 
-    memcpy(salt_buf, ch_buf, ch_len);
+    memcpy(p, ch_buf, ch_len);
     p += ch_len;
 
-    memcpy(salt_buf, sh_buf, sh_len);
+    memcpy(p, sh_buf, sh_len);
     p += sh_len;
 
     return salt_buf;
@@ -178,10 +165,9 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         // Load certificate
         // Certificate stored in certificate, length in cert_size
         load_certificate("server_cert.bin");
-        print_tlv_bytes(certificate, cert_size);
 
-        // spec says "certificate is already encoded as TLV 0xA0" but its uint8_t*
-        tlv *cert_tlv = create_cert_tlv(certificate);
+        // spec says "certificate is already encoded as TLV 0xA0"
+        tlv* cert_tlv = deserialize_tlv(certificate, cert_size);
         add_tlv(server_hello, cert_tlv);
 
         // I think this is what the spec refers to as the "ephemeral key" but
@@ -194,19 +180,24 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
 
         // I'm not sure if client_hello->length + 4 is the max possible length or not
         uint16_t ch_max_len = client_hello->length + 4;
-        uint16_t sh_max_len = server_hello->length + 4;
 
         uint8_t* ch_buf = malloc(ch_max_len);
-        if(!ch_buf){
-            error("Error allocating memory for client hello buffer");
+        uint8_t* nn_buf = malloc(NONCE_SIZE + 4);
+        uint8_t* pk_buf = malloc(p_key->length + 4);
+
+        if(!ch_buf || !nn_buf || !pk_buf){
+            error("Error allocating memory for buffer");
         }
-        // Get length of Client Hello
+
+        // Get lengths of Client Hello and Nonce, PK TLVs
         uint16_t ch_len = serialize_tlv(ch_buf, client_hello);
+        uint16_t nn_len = serialize_tlv(nn_buf, nn);
+        uint16_t pk_len = serialize_tlv(pk_buf, p_key);
 
         // Sign Server-Hello message
         uint8_t* sig_buf = malloc(MAX_SIG_LENGTH);
-        size_t size_to_sign = ch_len + NONCE_SIZE + cert_size + pub_key_size;
-        const uint8_t* to_sign = prep_data_to_sign(client_hello, nonce_buf, size_to_sign);
+        size_t size_to_sign = ch_len + nn_len + cert_size + pk_len;
+        const uint8_t* to_sign = prep_data_to_sign(ch_buf, nn_buf, pk_buf, ch_len, nn_len, pk_len);
 
         size_t signed_len = sign(sig_buf, to_sign, size_to_sign);
 
@@ -214,6 +205,8 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         tlv* sig = create_tlv(HANDSHAKE_SIGNATURE);
         add_val(sig, sig_buf, signed_len);
         add_tlv(server_hello, sig);
+
+        uint16_t sh_max_len = server_hello->length + 4;
 
         uint8_t* sh_buf = malloc(sh_max_len);
         if(!sh_buf){
@@ -253,8 +246,6 @@ void output_sec(uint8_t* buf, size_t length) {
             error("TLV packet from Client Hello malformed");
         }
 
-        print_tlv_bytes(client_hello, length);
-
         tlv* nn = get_tlv(client_hello, NONCE);
 
         tlv* ch_pk = get_tlv(client_hello, PUBLIC_KEY);
@@ -269,11 +260,14 @@ void output_sec(uint8_t* buf, size_t length) {
         break;
     }
     case CLIENT_SERVER_HELLO_AWAIT: {
+        break;
     }
     case SERVER_FINISHED_AWAIT: {
+        break;
     }
     case DATA_STATE: {
         tlv* data = deserialize_tlv(buf, length);
+        break;
     }
     default:
         break;
