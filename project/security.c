@@ -15,6 +15,12 @@ tlv* server_hello = NULL;
 uint8_t ts[1000] = {0};
 uint16_t ts_len = 0;
 
+// Store Client Hello and Server Hello buffers globally
+static uint8_t ch_buf[1000];
+static uint16_t ch_len;
+static uint8_t sh_buf[1000];
+static uint16_t sh_len;
+
 #define MAX_SIG_LENGTH 72
 
 bool inc_mac = false;  // For testing only: send incorrect MACs
@@ -53,7 +59,7 @@ tlv* create_nonce_tlv(uint8_t* nonce_buf){
 
     generate_nonce(nonce_buf, NONCE_SIZE);
     add_val(nn, nonce_buf, NONCE_SIZE);
-    
+
     return nn;
 }
 
@@ -91,38 +97,38 @@ const uint8_t* prep_data_to_sign(uint8_t* ch_buf, uint8_t* nonce_buf, uint8_t* p
     return to_sign;
 }
 
-uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t* sh_buf, \
-                   uint16_t ch_len, uint16_t sh_len){
-    uint8_t* salt_buf = malloc(ch_len + sh_len);
-    if (!salt_buf){
-        error("Error allocating memory for salt buffer");
-    }
+// uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t* sh_buf, \
+//                    uint16_t ch_len, uint16_t sh_len){
+//     uint8_t* salt_buf = malloc(ch_len + sh_len);
+//     if (!salt_buf){
+//         error("Error allocating memory for salt buffer");
+//     }
 
-    uint8_t* p = salt_buf;
+//     uint8_t* p = salt_buf;
 
-    memcpy(p, ch_buf, ch_len);
-    p += ch_len;
+//     memcpy(p, ch_buf, ch_len);
+//     p += ch_len;
 
-    memcpy(p, sh_buf, sh_len);
-    p += sh_len;
+//     memcpy(p, sh_buf, sh_len);
+//     p += sh_len;
 
-    return salt_buf;
-}
+//     return salt_buf;
+// }
 
-void generate_keys(uint8_t* salt, size_t size){
-    tlv* c_pub_key_tlv = get_tlv(client_hello, PUBLIC_KEY);
+// void generate_keys(uint8_t* salt, size_t size){
+//     tlv* c_pub_key_tlv = get_tlv(client_hello, PUBLIC_KEY);
 
-    const uint8_t* c_pub_key = c_pub_key_tlv->val;
-    uint16_t c_pub_key_len = c_pub_key_tlv->length;
+//     const uint8_t* c_pub_key = c_pub_key_tlv->val;
+//     uint16_t c_pub_key_len = c_pub_key_tlv->length;
 
-    // Store client public key in ec_peer_public_key
-    load_peer_public_key(c_pub_key, c_pub_key_len);
+//     // Store client public key in ec_peer_public_key
+//     load_peer_public_key(c_pub_key, c_pub_key_len);
 
-    // Derive secret with ec_peer_public_key and our private key
-    derive_secret();
+//     // Derive secret with ec_peer_public_key and our private key
+//     derive_secret();
 
-    derive_keys(salt, size);
-}
+//     derive_keys(salt, size);
+// }
 
 ssize_t input_sec(uint8_t* buf, size_t max_length) {
     switch (state_sec) {
@@ -141,9 +147,12 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         tlv* p_key = create_pubkey_tlv();
         add_tlv(client_hello, p_key);
 
-
         // Send data to transport layer, save length of data sent
         uint16_t len = serialize_tlv(buf, client_hello);
+
+        // Save Client Hello buffer and length globally
+        memcpy(ch_buf, buf, len);
+        ch_len = len;
 
         //TODO: check if len is greater than max_length?
 
@@ -170,7 +179,7 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         tlv* cert_tlv = deserialize_tlv(certificate, cert_size);
         add_tlv(server_hello, cert_tlv);
 
-        // I think this is what the spec refers to as the "ephemeral key" but
+        // TODO: I think this is what the spec refers to as the "ephemeral key" but
         // could be mistaken..
         load_private_key("server_key.bin");
         derive_public_key();
@@ -206,19 +215,15 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         add_val(sig, sig_buf, signed_len);
         add_tlv(server_hello, sig);
 
-        uint16_t sh_max_len = server_hello->length + 4;
+        // Prepare salt
+        uint8_t salt[sizeof(ch_buf) + sizeof(sh_buf)];
+        uint16_t salt_len = ch_len + sh_len;
+        memcpy(salt, ch_buf, ch_len);
+        memcpy(salt + ch_len, sh_buf, sh_len);
 
-        uint8_t* sh_buf = malloc(sh_max_len);
-        if(!sh_buf){
-            error("Error allocating memory for server hello buffer");
-        }
-        // Get current length of Server Hello
-        uint16_t sh_len = serialize_tlv(sh_buf, server_hello);
-
-        // Create salt from client hello appended by server hello
-        const uint8_t* salt = prep_salt(client_hello, server_hello, ch_buf, sh_buf, ch_len, sh_len);
-        
-        generate_keys(salt, ch_len + sh_len);
+        // Derive secret and keys
+        derive_secret();
+        derive_keys(salt, salt_len);
 
         uint16_t len = serialize_tlv(buf, server_hello);
 
@@ -229,6 +234,31 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
     }
     case CLIENT_FINISHED_SEND: {
         print("SEND FINISHED");
+
+        // Compute HMAC over transcript
+        uint8_t digest[MAC_SIZE];
+        uint8_t transcript[sizeof(ch_buf) + sizeof(sh_buf)];
+        uint16_t transcript_len = ch_len + sh_len;
+        memcpy(transcript, ch_buf, ch_len);
+        memcpy(transcript + ch_len, sh_buf, sh_len);
+
+        hmac(digest, transcript, transcript_len);
+
+        // Build Transcript TLV
+        tlv* tr = create_tlv(TRANSCRIPT);
+        add_val(tr, digest, MAC_SIZE);
+
+        // Build Finished TLV
+        tlv* fin = create_tlv(FINISHED);
+        add_tlv(fin, tr);
+
+        uint16_t len = serialize_tlv(buf, fin);
+        free_tlv(fin);
+
+        // Advance state
+        state_sec = DATA_STATE;
+
+        return len;
     }
     case DATA_STATE: {
     }
@@ -260,6 +290,68 @@ void output_sec(uint8_t* buf, size_t length) {
         break;
     }
     case CLIENT_SERVER_HELLO_AWAIT: {
+        // Receive Server Hello TLV
+        server_hello = deserialize_tlv(buf, length);
+        memcpy(sh_buf, buf, length);
+        sh_len = length;
+
+        if (!server_hello){
+            error("TLV packet from Server Hello malformed");
+        }
+
+        // Extract server public key from Server Hello
+        tlv* sh_pk = get_tlv(server_hello, PUBLIC_KEY);
+        load_peer_public_key(sh_pk->val, sh_pk->length);
+
+        // Verify handshake signature, certificate
+        tlv* cert = get_tlv(server_hello, CERTIFICATE);
+        if (!cert){
+            error("No certificate found in Server Hello");
+        }
+
+        tlv* dns = get_tlv(cert, DNS_NAME);
+        tlv* cert_pub = get_tlv(cert, PUBLIC_KEY);
+        tlv* lifetime = get_tlv(cert, LIFETIME);
+        tlv* cert_sig = get_tlv(cert, SIGNATURE);
+        if (!dns || !cert_pub || !lifetime || !cert_sig){
+            error("Certificate missing required fields");
+        }
+
+        // Check DNS name
+        if (hostname == NULL || strcmp((char*) dns->val, hostname) != 0){
+            error("Certificate DNS name does not match hostname");
+        }
+
+        // TODO: Verify certificate signature not working yet
+
+        uint8_t cert_data[1500];
+        uint16_t cd_len = 0;
+
+        cd_len += serialize_tlv(cert_data + cd_len, dns);
+        cd_len += serialize_tlv(cert_data + cd_len, cert_pub);
+        cd_len += serialize_tlv(cert_data + cd_len, lifetime);
+
+        load_ca_public_key("ca_public_key.bin");
+
+        int ok = verify(cert_sig->val, cert_sig->length,
+                        cert_data, cd_len,
+                        ec_ca_public_key);
+
+        if (!ok){
+            error("Certificate verification failed");
+        }
+
+        // Prepare salt
+        uint8_t salt[sizeof(ch_buf) + sizeof(sh_buf)];
+        uint16_t salt_len = ch_len + sh_len;
+        memcpy(salt, ch_buf, ch_len);
+        memcpy(salt + ch_len, sh_buf, sh_len);
+
+        // Derive secret and keys
+        derive_secret();
+        derive_keys(salt, salt_len);
+
+        state_sec = CLIENT_FINISHED_SEND;
         break;
     }
     case SERVER_FINISHED_AWAIT: {
