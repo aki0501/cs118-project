@@ -299,11 +299,12 @@ void output_sec(uint8_t* buf, size_t length) {
             error("TLV packet from Server Hello malformed");
         }
 
-        // Extract server public key from Server Hello
+        // Extract PK and Nonce fields from Server Hello
         tlv* sh_pk = get_tlv(server_hello, PUBLIC_KEY);
-        load_peer_public_key(sh_pk->val, sh_pk->length);
+        tlv* sh_nonce = get_tlv(server_hello, NONCE);
+        tlv* sh_sig = get_tlv(server_hello, HANDSHAKE_SIGNATURE);
 
-        // Verify handshake signature, certificate
+        // Verify certificate
         tlv* cert = get_tlv(server_hello, CERTIFICATE);
         if (!cert){
             error("No certificate found in Server Hello");
@@ -340,6 +341,37 @@ void output_sec(uint8_t* buf, size_t length) {
         if (!ok){
             error("Certificate verification failed");
         }
+
+        // Verify handshake-signature
+
+        // Load server's PK in cert
+        load_peer_public_key(cert_pub->val, cert_pub->length);
+
+        size_t temp_verify_sig_size = ch_len + (sh_nonce->length + 4) + (cert->length) + (sh_pk->length + 4);
+        uint8_t* verify_sig_buf = malloc(temp_verify_sig_size);
+        if (!verify_sig_buf){
+            error("Error allocating buffer for verify sig");
+        }
+
+        // Pointer to copy data into buf
+        uint8_t* p = verify_sig_buf;
+
+        // Copy data into buf
+        memcpy(p, ch_buf, ch_len);
+        p += ch_len;
+
+        p += serialize_tlv(p, sh_nonce); // will write into p and increment its length
+        p += serialize_tlv(p, cert);
+        p += serialize_tlv(p, sh_pk);
+
+        size_t verify_sig_size = p - verify_sig_buf; // get actual length of buffer
+
+        if (!verify(sh_sig->val, sh_sig->length, verify_sig_buf, verify_sig_size, ec_peer_public_key)){
+            error("Handshake signature verification failed");
+        }
+
+        // Reload PK with ephemeral key to derive secret
+        load_peer_public_key(sh_pk->val, sh_pk->length);
 
         // Prepare salt
         uint8_t salt[sizeof(ch_buf) + sizeof(sh_buf)];
