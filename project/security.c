@@ -23,7 +23,8 @@ static uint16_t sh_len;
 
 #define MAX_SIG_LENGTH 72
 #define BLOCK_SIZE 16 // Block size for plaintext
-#define MAX_CIPHERTEXT_LEN 943
+#define MAX_CIPHERTEXT_LEN 950
+#define MAX_PLAINTEXT_LEN 943
 
 bool inc_mac = false;  // For testing only: send incorrect MACs
 
@@ -264,51 +265,65 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
     }
     case DATA_STATE: {
         print("SENDING DATA");
+        // Cap plaintext to spec max
+        if (max_length > MAX_PLAINTEXT_LEN) {
+            max_length = MAX_PLAINTEXT_LEN;
+        }
 
+        // Allocate and zero IV
         uint8_t iv[IV_SIZE];
-        uint8_t* cipher = malloc(MAX_CIPHERTEXT_LEN);
-        if (!cipher) return 0;
+        memset(iv, 0, IV_SIZE);
 
-        // Encrypt the plaintext
+        // Allocate and zero cipher buffer
+        uint8_t* cipher = malloc(max_length + 16);
+        if (!cipher) {
+            return 0;
+        }
+        memset(cipher, 0, max_length + 16);
+
+        // Encrypt data
         size_t cipher_len = encrypt_data(iv, cipher, buf, max_length);
 
-        // Compute HMAC over IV + ciphertext
+        // Allocate and zero MAC buffer
         uint8_t mac[MAC_SIZE];
         uint8_t* mac_data = malloc(IV_SIZE + cipher_len);
         if (!mac_data) {
+            free(cipher);
             return 0;
         }
+        memset(mac_data, 0, IV_SIZE + cipher_len);
+
+        // Copy IV + cipher for HMAC
         memcpy(mac_data, iv, IV_SIZE);
         memcpy(mac_data + IV_SIZE, cipher, cipher_len);
+
+        // Compute HMAC
         hmac(mac, mac_data, IV_SIZE + cipher_len);
 
-        // Build TLV for IV
+        // Create TLVs
         tlv* iv_tlv = create_tlv(IV);
         add_val(iv_tlv, iv, IV_SIZE);
 
-        // Build TLV for ciphertext
         tlv* ct_tlv = create_tlv(CIPHERTEXT);
         add_val(ct_tlv, cipher, cipher_len);
 
-        // Build TLV for MAC
         tlv* mac_tlv = create_tlv(MAC);
         add_val(mac_tlv, mac, MAC_SIZE);
 
-        // Wrap everything in a DATA TLV
+        // Wrap TLVs into DATA TLV
         tlv* data_tlv = create_tlv(DATA);
         add_tlv(data_tlv, iv_tlv);
         add_tlv(data_tlv, ct_tlv);
         add_tlv(data_tlv, mac_tlv);
 
-        // Serialize the TLV into `buf`
-        uint16_t len = serialize_tlv(buf, data_tlv);
+        // Serialize TLV
+        uint16_t len_tlv = serialize_tlv(buf, data_tlv);
 
         // Cleanup
         free_tlv(data_tlv);
-        free(cipher);
-        free(mac_data);
 
-        return len;
+        print("DATA SENT");
+        return len_tlv;
     }
     default:
         return 0;
