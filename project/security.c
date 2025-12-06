@@ -22,6 +22,8 @@ static uint8_t sh_buf[1000];
 static uint16_t sh_len;
 
 #define MAX_SIG_LENGTH 72
+#define BLOCK_SIZE 16 // Block size for plaintext
+#define MAX_CIPHERTEXT_LEN 943
 
 bool inc_mac = false;  // For testing only: send incorrect MACs
 
@@ -261,6 +263,52 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         return len;
     }
     case DATA_STATE: {
+        print("SENDING DATA");
+
+        uint8_t iv[IV_SIZE];
+        uint8_t* cipher = malloc(MAX_CIPHERTEXT_LEN);
+        if (!cipher) return 0;
+
+        // Encrypt the plaintext
+        size_t cipher_len = encrypt_data(iv, cipher, buf, max_length);
+
+        // Compute HMAC over IV + ciphertext
+        uint8_t mac[MAC_SIZE];
+        uint8_t* mac_data = malloc(IV_SIZE + cipher_len);
+        if (!mac_data) {
+            return 0;
+        }
+        memcpy(mac_data, iv, IV_SIZE);
+        memcpy(mac_data + IV_SIZE, cipher, cipher_len);
+        hmac(mac, mac_data, IV_SIZE + cipher_len);
+
+        // Build TLV for IV
+        tlv* iv_tlv = create_tlv(IV);
+        add_val(iv_tlv, iv, IV_SIZE);
+
+        // Build TLV for ciphertext
+        tlv* ct_tlv = create_tlv(CIPHERTEXT);
+        add_val(ct_tlv, cipher, cipher_len);
+
+        // Build TLV for MAC
+        tlv* mac_tlv = create_tlv(MAC);
+        add_val(mac_tlv, mac, MAC_SIZE);
+
+        // Wrap everything in a DATA TLV
+        tlv* data_tlv = create_tlv(DATA);
+        add_tlv(data_tlv, iv_tlv);
+        add_tlv(data_tlv, ct_tlv);
+        add_tlv(data_tlv, mac_tlv);
+
+        // Serialize the TLV into `buf`
+        uint16_t len = serialize_tlv(buf, data_tlv);
+
+        // Cleanup
+        free_tlv(data_tlv);
+        free(cipher);
+        free(mac_data);
+
+        return len;
     }
     default:
         return 0;
@@ -420,7 +468,41 @@ void output_sec(uint8_t* buf, size_t length) {
         break;
     }
     case DATA_STATE: {
-        tlv* data = deserialize_tlv(buf, length);
+        print("RECEIVED DATA");
+
+        // Deserialize the DATA TLV
+        tlv* data_tlv = deserialize_tlv(buf, length);
+        if (!data_tlv) {
+            error("Malformed DATA TLV");
+        }
+
+        // Extract IV, ciphertext, and MAC
+        tlv* iv_tlv = get_tlv(data_tlv, IV);
+        tlv* ct_tlv = get_tlv(data_tlv, CIPHERTEXT);
+        tlv* mac_tlv = get_tlv(data_tlv, MAC);
+
+        if (!iv_tlv || !ct_tlv || !mac_tlv) {
+            error("Missing fields in DATA TLV");
+        }
+
+        // Recompute HMAC to verify integrity
+        uint8_t mac_data[IV_SIZE + ct_tlv->length];
+        memcpy(mac_data, iv_tlv->val, IV_SIZE);
+        memcpy(mac_data + IV_SIZE, ct_tlv->val, ct_tlv->length);
+
+        uint8_t expected_mac[MAC_SIZE];
+        hmac(expected_mac, mac_data, IV_SIZE + ct_tlv->length);
+
+        if (memcmp(mac_tlv->val, expected_mac, MAC_SIZE) != 0) {
+            error("HMAC mismatch: data integrity check failed");
+        }
+
+        // Decrypt the ciphertext
+        uint8_t plaintext[ct_tlv->length];
+        size_t plain_len = decrypt_cipher(plaintext, ct_tlv->val, ct_tlv->length, iv_tlv->val);
+
+        free_tlv(data_tlv);
+
         break;
     }
     default:
