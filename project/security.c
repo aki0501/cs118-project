@@ -323,8 +323,6 @@ void output_sec(uint8_t* buf, size_t length) {
             error("Certificate DNS name does not match hostname");
         }
 
-        // TODO: Verify certificate signature not working yet
-
         uint8_t cert_data[1500];
         uint16_t cd_len = 0;
 
@@ -387,6 +385,38 @@ void output_sec(uint8_t* buf, size_t length) {
         break;
     }
     case SERVER_FINISHED_AWAIT: {
+        print("RECEIVED CLIENT FINISHED");
+        // Deserialize the FINISHED message from client
+        tlv* fin = deserialize_tlv(buf, length);
+        if (!fin) {
+            error("Malformed FINISHED message from client");
+        }
+
+        // Extract the embedded TRANSCRIPT TLV
+        tlv* tr = get_tlv(fin, TRANSCRIPT);
+        if (!tr || tr->length != MAC_SIZE) {
+            error("Invalid or missing HMAC in FINISHED message");
+        }
+
+        uint8_t* client_digest = tr->val;
+
+        // Reconstruct the handshake transcript: Client Hello + Server Hello
+        uint8_t transcript[sizeof(ch_buf) + sizeof(sh_buf)];
+        uint16_t transcript_len = ch_len + sh_len;
+        memcpy(transcript, ch_buf, ch_len);
+        memcpy(transcript + ch_len, sh_buf, sh_len);
+
+        // Compute server's own HMAC
+        uint8_t server_digest[MAC_SIZE];
+        hmac(server_digest, transcript, transcript_len);
+
+        // Compare the computed HMAC with client's HMAC
+        if (memcmp(server_digest, client_digest, MAC_SIZE) != 0) {
+            error("HMAC mismatch: handshake verification failed");
+        }
+
+        state_sec = DATA_STATE;
+        free_tlv(fin);
         break;
     }
     case DATA_STATE: {
