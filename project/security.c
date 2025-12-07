@@ -489,7 +489,10 @@ void output_sec(uint8_t* buf, size_t length) {
         tlv* data_tlv = deserialize_tlv(buf, length);
         if (!data_tlv) {
             error("Malformed DATA TLV");
+            break;
         }
+        print_tlv_bytes(buf, length);
+        print("we good");
 
         // Extract IV, ciphertext, and MAC
         tlv* iv_tlv = get_tlv(data_tlv, IV);
@@ -497,27 +500,53 @@ void output_sec(uint8_t* buf, size_t length) {
         tlv* mac_tlv = get_tlv(data_tlv, MAC);
 
         if (!iv_tlv || !ct_tlv || !mac_tlv) {
+            free_tlv(data_tlv);
             error("Missing fields in DATA TLV");
         }
 
-        // Recompute HMAC to verify integrity
-        uint8_t mac_data[IV_SIZE + ct_tlv->length];
+        // Validate ciphertext length
+        if (ct_tlv->length > MAX_CIPHERTEXT_LEN) {
+            free_tlv(data_tlv);
+            error("Ciphertext length exceeds maximum allowed");
+        }
+
+        // Allocate buffer for HMAC verification
+        size_t mac_data_len = IV_SIZE + ct_tlv->length;
+        uint8_t* mac_data = malloc(mac_data_len);
+        if (!mac_data) {
+            free_tlv(data_tlv);
+            error("Failed to allocate buffer for HMAC verification");
+        }
+
         memcpy(mac_data, iv_tlv->val, IV_SIZE);
         memcpy(mac_data + IV_SIZE, ct_tlv->val, ct_tlv->length);
 
         uint8_t expected_mac[MAC_SIZE];
-        hmac(expected_mac, mac_data, IV_SIZE + ct_tlv->length);
+        hmac(expected_mac, mac_data, mac_data_len);
+        free(mac_data);
 
+        // Verify HMAC
         if (memcmp(mac_tlv->val, expected_mac, MAC_SIZE) != 0) {
+            free_tlv(data_tlv);
             error("HMAC mismatch: data integrity check failed");
         }
 
+        // Allocate buffer for plaintext
+        uint8_t* plaintext = malloc(ct_tlv->length);
+        if (!plaintext) {
+            free_tlv(data_tlv);
+            error("Failed to allocate buffer for plaintext");
+        }
+
         // Decrypt the ciphertext
-        uint8_t plaintext[ct_tlv->length];
         size_t plain_len = decrypt_cipher(plaintext, ct_tlv->val, ct_tlv->length, iv_tlv->val);
 
+        fwrite(plaintext, 1, plain_len, stdout);
+        fflush(stdout);
+        free(plaintext);
         free_tlv(data_tlv);
 
+        print("DECRYPTED DATA");
         break;
     }
     default:
