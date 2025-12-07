@@ -74,7 +74,6 @@ tlv* create_pubkey_tlv(){
     return p_key;
 }
 
-
 const uint8_t* prep_data_to_sign(uint8_t* ch_buf, uint8_t* nonce_buf, uint8_t* pk_buf, \
                                  uint16_t ch_len, uint16_t nn_len, uint16_t pk_len){
     uint16_t size = ch_len + nn_len + pk_len + cert_size;
@@ -100,39 +99,6 @@ const uint8_t* prep_data_to_sign(uint8_t* ch_buf, uint8_t* nonce_buf, uint8_t* p
     return to_sign;
 }
 
-// uint8_t* prep_salt(tlv* client_hello,tlv* server_hello, uint8_t* ch_buf, uint8_t* sh_buf, \
-//                    uint16_t ch_len, uint16_t sh_len){
-//     uint8_t* salt_buf = malloc(ch_len + sh_len);
-//     if (!salt_buf){
-//         error("Error allocating memory for salt buffer");
-//     }
-
-//     uint8_t* p = salt_buf;
-
-//     memcpy(p, ch_buf, ch_len);
-//     p += ch_len;
-
-//     memcpy(p, sh_buf, sh_len);
-//     p += sh_len;
-
-//     return salt_buf;
-// }
-
-// void generate_keys(uint8_t* salt, size_t size){
-//     tlv* c_pub_key_tlv = get_tlv(client_hello, PUBLIC_KEY);
-
-//     const uint8_t* c_pub_key = c_pub_key_tlv->val;
-//     uint16_t c_pub_key_len = c_pub_key_tlv->length;
-
-//     // Store client public key in ec_peer_public_key
-//     load_peer_public_key(c_pub_key, c_pub_key_len);
-
-//     // Derive secret with ec_peer_public_key and our private key
-//     derive_secret();
-
-//     derive_keys(salt, size);
-// }
-
 ssize_t input_sec(uint8_t* buf, size_t max_length) {
     switch (state_sec) {
     case CLIENT_CLIENT_HELLO_SEND: {
@@ -152,14 +118,17 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
 
         // Send data to transport layer, save length of data sent
         uint16_t len = serialize_tlv(buf, client_hello);
+        if (len > max_length) {
+            error("Client Hello length exceeds maximum length");
+        }
 
         // Save Client Hello buffer and length globally
         memcpy(ch_buf, buf, len);
         ch_len = len;
 
-        //TODO: check if len is greater than max_length?
-
+        // Cleanup
         free_tlv(client_hello);
+        free(nonce_buf); // from create_nonce_buf
 
         state_sec = CLIENT_SERVER_HELLO_AWAIT;
 
@@ -168,41 +137,36 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
     case SERVER_SERVER_HELLO_SEND: {
         print("SEND SERVER HELLO");
 
+        // Create Server Hello TLV
         server_hello = create_tlv(SERVER_HELLO);
 
+        // Generate nonce
         uint8_t* nonce_buf = create_nonce_buf();
         tlv* nn = create_nonce_tlv(nonce_buf);
         add_tlv(server_hello, nn);
 
         // Load certificate
-        // Certificate stored in certificate, length in cert_size
         load_certificate("server_cert.bin");
 
-        // spec says "certificate is already encoded as TLV 0xA0"
+        // Add Certificate TLV to Server Hello
         tlv* cert_tlv = deserialize_tlv(certificate, cert_size);
         add_tlv(server_hello, cert_tlv);
 
-        // TODO: I think this is what the spec refers to as the "ephemeral key" but
-        // could be mistaken..
+        // Generate ephemeral key pair
         load_private_key("server_key.bin");
         derive_public_key();
 
         tlv* p_key = create_pubkey_tlv();
         add_tlv(server_hello, p_key);
 
-        // I'm not sure if client_hello->length + 4 is the max possible length or not
-        uint16_t ch_max_len = client_hello->length + 4;
-
-        uint8_t* ch_buf = malloc(ch_max_len);
         uint8_t* nn_buf = malloc(NONCE_SIZE + 4);
         uint8_t* pk_buf = malloc(p_key->length + 4);
 
-        if(!ch_buf || !nn_buf || !pk_buf){
+        if(!nn_buf || !pk_buf){
             error("Error allocating memory for buffer");
         }
 
         // Get lengths of Client Hello and Nonce, PK TLVs
-        uint16_t ch_len = serialize_tlv(ch_buf, client_hello);
         uint16_t nn_len = serialize_tlv(nn_buf, nn);
         uint16_t pk_len = serialize_tlv(pk_buf, p_key);
 
@@ -218,6 +182,11 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         add_val(sig, sig_buf, signed_len);
         add_tlv(server_hello, sig);
 
+        // Update sh_buf and sh_len globals
+        uint16_t cur_sh_len = serialize_tlv(buf, server_hello);
+        memcpy(sh_buf, buf, cur_sh_len);
+        sh_len = cur_sh_len;
+
         // Prepare salt
         uint8_t salt[sizeof(ch_buf) + sizeof(sh_buf)];
         uint16_t salt_len = ch_len + sh_len;
@@ -231,6 +200,13 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         uint16_t len = serialize_tlv(buf, server_hello);
 
         state_sec = SERVER_FINISHED_AWAIT;
+
+        // Free allocated buffers
+        free(nonce_buf); // from create_nonce_buf
+        free(nn_buf);
+        free(pk_buf);
+        free(sig_buf);
+        free(to_sign); // from prep_data_to_sign
 
         return len;
 
@@ -265,9 +241,12 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
     }
     case DATA_STATE: {
         print("SENDING DATA");
-        // Cap plaintext to spec max
-        if (max_length > MAX_PLAINTEXT_LEN) {
-            max_length = MAX_PLAINTEXT_LEN;
+
+        // Read plaintext from IO
+        uint8_t plaintext[MAX_PLAINTEXT_LEN];
+        ssize_t plain_len = input_io(plaintext, MAX_PLAINTEXT_LEN);
+        if (plain_len <= 0) {
+            return 0;
         }
 
         // Allocate and zero IV
@@ -275,14 +254,14 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         memset(iv, 0, IV_SIZE);
 
         // Allocate and zero cipher buffer
-        uint8_t* cipher = malloc(max_length + 16);
+        uint8_t* cipher = malloc(plain_len + 16);
         if (!cipher) {
             return 0;
         }
-        memset(cipher, 0, max_length + 16);
+        memset(cipher, 0, plain_len + 16);
 
         // Encrypt data
-        size_t cipher_len = encrypt_data(iv, cipher, buf, max_length);
+        size_t cipher_len = encrypt_data(iv, cipher, plaintext, plain_len);
 
         // Allocate and zero MAC buffer
         uint8_t mac[MAC_SIZE];
@@ -293,13 +272,6 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         }
         memset(mac_data, 0, IV_SIZE + cipher_len);
 
-        // Copy IV + cipher for HMAC
-        memcpy(mac_data, iv, IV_SIZE);
-        memcpy(mac_data + IV_SIZE, cipher, cipher_len);
-
-        // Compute HMAC
-        hmac(mac, mac_data, IV_SIZE + cipher_len);
-
         // Create TLVs
         tlv* iv_tlv = create_tlv(IV);
         add_val(iv_tlv, iv, IV_SIZE);
@@ -307,6 +279,13 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         tlv* ct_tlv = create_tlv(CIPHERTEXT);
         add_val(ct_tlv, cipher, cipher_len);
 
+        // Compute HMAC
+        uint8_t temp[1500];
+        uint16_t iv_len = serialize_tlv(temp, iv_tlv);
+        uint16_t ct_len = serialize_tlv(temp + iv_len, ct_tlv);
+        hmac(mac, temp, iv_len + ct_len);
+
+        // Construct MAC TLV after HMAC computation
         tlv* mac_tlv = create_tlv(MAC);
         add_val(mac_tlv, mac, MAC_SIZE);
 
@@ -316,14 +295,19 @@ ssize_t input_sec(uint8_t* buf, size_t max_length) {
         add_tlv(data_tlv, ct_tlv);
         add_tlv(data_tlv, mac_tlv);
 
-        // Serialize TLV
-        uint16_t len_tlv = serialize_tlv(buf, data_tlv);
+        // Serialize TLV to network output buffer (buf)
+        uint16_t data_len = serialize_tlv(buf, data_tlv);
+        if (data_len > max_length) {
+            error("DATA TLV length exceeds maximum length");
+        }
 
         // Cleanup
         free_tlv(data_tlv);
+        free(cipher);
+        free(mac_data);
 
         print("DATA SENT");
-        return len_tlv;
+        return data_len;
     }
     default:
         return 0;
@@ -334,6 +318,10 @@ void output_sec(uint8_t* buf, size_t length) {
     switch (state_sec) {
     case SERVER_CLIENT_HELLO_AWAIT: {
         client_hello = deserialize_tlv(buf, length);
+
+        // Save Client Hello buffer and length globally
+        memcpy(ch_buf, buf, length);
+        ch_len = length;
 
         if (!client_hello){
             error("TLV packet from Client Hello malformed");
@@ -403,8 +391,6 @@ void output_sec(uint8_t* buf, size_t length) {
             error("Certificate verification failed");
         }
 
-        // Verify handshake-signature
-
         // Load server's PK in cert
         load_peer_public_key(cert_pub->val, cert_pub->length);
 
@@ -427,6 +413,7 @@ void output_sec(uint8_t* buf, size_t length) {
 
         size_t verify_sig_size = p - verify_sig_buf; // get actual length of buffer
 
+        // Verify handshake-signature
         if (!verify(sh_sig->val, sh_sig->length, verify_sig_buf, verify_sig_size, ec_peer_public_key)){
             error("Handshake signature verification failed");
         }
@@ -476,6 +463,7 @@ void output_sec(uint8_t* buf, size_t length) {
         // Compare the computed HMAC with client's HMAC
         if (memcmp(server_digest, client_digest, MAC_SIZE) != 0) {
             error("HMAC mismatch: handshake verification failed");
+            exit(4); // from the spec
         }
 
         state_sec = DATA_STATE;
@@ -491,8 +479,6 @@ void output_sec(uint8_t* buf, size_t length) {
             error("Malformed DATA TLV");
             break;
         }
-        print_tlv_bytes(buf, length);
-        print("we good");
 
         // Extract IV, ciphertext, and MAC
         tlv* iv_tlv = get_tlv(data_tlv, IV);
@@ -511,24 +497,26 @@ void output_sec(uint8_t* buf, size_t length) {
         }
 
         // Allocate buffer for HMAC verification
-        size_t mac_data_len = IV_SIZE + ct_tlv->length;
-        uint8_t* mac_data = malloc(mac_data_len);
+        uint8_t* mac_data = malloc(1500); // sufficiently large buffer
         if (!mac_data) {
             free_tlv(data_tlv);
             error("Failed to allocate buffer for HMAC verification");
         }
 
-        memcpy(mac_data, iv_tlv->val, IV_SIZE);
-        memcpy(mac_data + IV_SIZE, ct_tlv->val, ct_tlv->length);
+        // Prepare data for HMAC: IV + ciphertext (in TLV format)
+        uint16_t iv_len = serialize_tlv(mac_data, iv_tlv);
+        uint16_t ct_len = serialize_tlv(mac_data + iv_len, ct_tlv);
+        size_t mac_data_len = iv_len + ct_len;
 
+        // Compute expected HMAC
         uint8_t expected_mac[MAC_SIZE];
         hmac(expected_mac, mac_data, mac_data_len);
-        free(mac_data);
 
-        // Verify HMAC
+        // Verify HMAC with received MAC
         if (memcmp(mac_tlv->val, expected_mac, MAC_SIZE) != 0) {
             free_tlv(data_tlv);
             error("HMAC mismatch: data integrity check failed");
+            exit(5); // from the spec
         }
 
         // Allocate buffer for plaintext
@@ -538,12 +526,13 @@ void output_sec(uint8_t* buf, size_t length) {
             error("Failed to allocate buffer for plaintext");
         }
 
-        // Decrypt the ciphertext
+        // Decrypt the ciphertext and output plaintext
         size_t plain_len = decrypt_cipher(plaintext, ct_tlv->val, ct_tlv->length, iv_tlv->val);
+        output_io(plaintext, plain_len);
 
-        fwrite(plaintext, 1, plain_len, stdout);
-        fflush(stdout);
+        // Cleanup
         free(plaintext);
+        free(mac_data);
         free_tlv(data_tlv);
 
         print("DECRYPTED DATA");
