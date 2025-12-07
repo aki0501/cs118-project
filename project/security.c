@@ -299,7 +299,7 @@ void output_sec(uint8_t* buf, size_t length) {
             error("TLV packet from Server Hello malformed");
         }
 
-        // Extract PK and Nonce fields from Server Hello
+        // Extract fields from Server Hello
         tlv* sh_pk = get_tlv(server_hello, PUBLIC_KEY);
         tlv* sh_nonce = get_tlv(server_hello, NONCE);
         tlv* sh_sig = get_tlv(server_hello, HANDSHAKE_SIGNATURE);
@@ -323,7 +323,7 @@ void output_sec(uint8_t* buf, size_t length) {
             error("Certificate DNS name does not match hostname");
         }
 
-        // TODO: Verify certificate signature not working yet
+        // Verify certificate signature
 
         uint8_t cert_data[1500];
         uint16_t cd_len = 0;
@@ -387,6 +387,34 @@ void output_sec(uint8_t* buf, size_t length) {
         break;
     }
     case SERVER_FINISHED_AWAIT: {
+        tlv* fin = deserialize_tlv(buf, length);
+        
+        if (!fin){
+            error("Finished TLV not received");
+        }
+
+        tlv* transcript_tlv = get_tlv(fin, TRANSCRIPT);
+        if(!transcript_tlv){
+            error("Missing transcript in Finished TLV");
+        }
+
+        
+        // Compute HMAC over transcript
+        uint8_t our_digest[MAC_SIZE];
+        uint8_t transcript[sizeof(ch_buf) + sizeof(sh_buf)];
+        uint16_t transcript_len = ch_len + sh_len;
+        memcpy(transcript, ch_buf, ch_len);
+        memcpy(transcript + ch_len, sh_buf, sh_len);
+
+        hmac(our_digest, transcript, transcript_len);
+
+        // Compare client HMAC and ours
+        if (memcmp(our_digest, transcript_tlv->val, MAC_SIZE) != 0){
+            error("Digests do not match");
+        }
+
+        state_sec = DATA_STATE;
+
         break;
     }
     case DATA_STATE: {
