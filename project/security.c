@@ -350,7 +350,7 @@ void output_sec(uint8_t* buf, size_t length) {
             error("TLV packet from Server Hello malformed");
         }
 
-        // Extract PK and Nonce fields from Server Hello
+        // Extract fields from Server Hello
         tlv* sh_pk = get_tlv(server_hello, PUBLIC_KEY);
         tlv* sh_nonce = get_tlv(server_hello, NONCE);
         tlv* sh_sig = get_tlv(server_hello, HANDSHAKE_SIGNATURE);
