@@ -319,13 +319,15 @@ void output_sec(uint8_t* buf, size_t length) {
     case SERVER_CLIENT_HELLO_AWAIT: {
         client_hello = deserialize_tlv(buf, length);
 
+        if (!client_hello){
+            exit(6);
+        }
+
         // Save Client Hello buffer and length globally
         memcpy(ch_buf, buf, length);
         ch_len = length;
 
-        if (!client_hello){
-            error("TLV packet from Client Hello malformed");
-        }
+
 
         tlv* nn = get_tlv(client_hello, NONCE);
 
@@ -347,7 +349,7 @@ void output_sec(uint8_t* buf, size_t length) {
         sh_len = length;
 
         if (!server_hello){
-            error("TLV packet from Server Hello malformed");
+            exit(6);
         }
 
         // Extract fields from Server Hello
@@ -371,7 +373,7 @@ void output_sec(uint8_t* buf, size_t length) {
 
         // Check DNS name
         if (hostname == NULL || strcmp((char*) dns->val, hostname) != 0){
-            error("Certificate DNS name does not match hostname");
+            exit(2);
         }
 
         uint8_t cert_data[1500];
@@ -388,7 +390,7 @@ void output_sec(uint8_t* buf, size_t length) {
                         ec_ca_public_key);
 
         if (!ok){
-            error("Certificate verification failed");
+            exit(1);
         }
 
         // Load server's PK in cert
@@ -415,7 +417,7 @@ void output_sec(uint8_t* buf, size_t length) {
 
         // Verify handshake-signature
         if (!verify(sh_sig->val, sh_sig->length, verify_sig_buf, verify_sig_size, ec_peer_public_key)){
-            error("Handshake signature verification failed");
+            exit(3);
         }
 
         // Reload PK with ephemeral key to derive secret
@@ -439,7 +441,7 @@ void output_sec(uint8_t* buf, size_t length) {
         // Deserialize the FINISHED message from client
         tlv* fin = deserialize_tlv(buf, length);
         if (!fin) {
-            error("Malformed FINISHED message from client");
+            exit(6);
         }
 
         // Extract the embedded TRANSCRIPT TLV
@@ -476,8 +478,7 @@ void output_sec(uint8_t* buf, size_t length) {
         // Deserialize the DATA TLV
         tlv* data_tlv = deserialize_tlv(buf, length);
         if (!data_tlv) {
-            error("Malformed DATA TLV");
-            break;
+            exit(6);
         }
 
         // Extract IV, ciphertext, and MAC
@@ -487,13 +488,13 @@ void output_sec(uint8_t* buf, size_t length) {
 
         if (!iv_tlv || !ct_tlv || !mac_tlv) {
             free_tlv(data_tlv);
-            error("Missing fields in DATA TLV");
+            exit(6);
         }
 
         // Validate ciphertext length
         if (ct_tlv->length > MAX_CIPHERTEXT_LEN) {
             free_tlv(data_tlv);
-            error("Ciphertext length exceeds maximum allowed");
+            exit(6);
         }
 
         // Allocate buffer for HMAC verification
@@ -515,7 +516,6 @@ void output_sec(uint8_t* buf, size_t length) {
         // Verify HMAC with received MAC
         if (memcmp(mac_tlv->val, expected_mac, MAC_SIZE) != 0) {
             free_tlv(data_tlv);
-            error("HMAC mismatch: data integrity check failed");
             exit(5); // from the spec
         }
 
